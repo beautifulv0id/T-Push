@@ -12,3 +12,5 @@ shapely==1.8.4
 opencv-python
 gdown
 matplotlib
+timm
+scikit-learn
