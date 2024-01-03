@@ -135,8 +135,8 @@ class DiffusionTransformerImage(nn.Module):
     
     def compute_loss(self, batch):
         # get batch data
-        abs_agent_pos = batch["agent_pos"].to(self.device)
         rgb = batch["rgb"].to(self.device)
+        abs_agent_pos = batch["agent_pos"].to(self.device)
         abs_goal_pos = batch["goal_pose"][...,:2].to(self.device)
         B = rgb.shape[0]
 
@@ -160,7 +160,7 @@ class DiffusionTransformerImage(nn.Module):
             goal_pos, noise, timesteps)
         
         pred = self.noise_pred_net(sample=noisy_goal_pos, timestep=timesteps, global_cond=scene_embedding)
-        loss = F.mse_loss(pred, goal_pos).mean()
+        loss = F.mse_loss(pred, noise).mean()
 
         return loss
     
