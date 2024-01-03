@@ -13,11 +13,13 @@ class DiffusionTransformerImage(nn.Module):
     def __init__(self, 
                     action_dim = 2,
                     obs_horizon = 2,
-                    action_horizon = None,
+                    pred_horizon = None,
                     noise_scheduler: DDPMScheduler = DDPMScheduler(),
                     vis_backbone="clip", 
-                    re_cross_attn_layer=4, 
-                    re_cross_attn_num_heads=4, 
+                    re_cross_attn_layer_within=4, 
+                    re_cross_attn_num_heads_within=4, 
+                    re_cross_attn_layer_across=4,
+                    re_cross_attn_num_heads_across=4,
                     embedding_dim=60, 
                     device="cuda",
                     env_size=[512, 512]):
@@ -29,7 +31,7 @@ class DiffusionTransformerImage(nn.Module):
 
         self.obs_horizon = obs_horizon
         self.action_dim = action_dim
-        self.action_horizon = action_horizon
+        self.pred_horizon = pred_horizon
         self.device = device
         self.embedding_dim = embedding_dim
         self.noise_scheduler = noise_scheduler
@@ -45,17 +47,18 @@ class DiffusionTransformerImage(nn.Module):
         self.query_embedding = nn.Embedding(1, embedding_dim).to(device)
         self.rotary_embedder = RotaryPositionEncoding2D(embedding_dim).to(device)
 
-        self.re_cross_attn = RelativeCrossAttentionModule(embedding_dim,
-                                                                re_cross_attn_num_heads,
-                                                                re_cross_attn_layer).to(device)
+        self.re_cross_attn_within = RelativeCrossAttentionModule(embedding_dim,
+                                                                re_cross_attn_num_heads_within,
+                                                                re_cross_attn_layer_within).to(device)
+        self.re_cross_attn_across = RelativeCrossAttentionModule(embedding_dim,
+                                                                re_cross_attn_num_heads_across,
+                                                                re_cross_attn_layer_across).to(device)
         
         self.noise_pred_net = ConditionalUnet1D(input_dim=action_dim, global_cond_dim=embedding_dim)
         
         self.time_embedder = SinusoidalPosEmb(embedding_dim).to(device)
 
         self.env_size = torch.tensor(env_size).to(self.device).float()
-        self.normalize_pos_fn = lambda pos: pos / self.env_size
-        self.unnormalize_pos_fn = lambda pos: pos * self.env_size
 
     def compute_visual_features(self, rgb, out_res=[24, 24]):
         with torch.no_grad():
@@ -95,10 +98,17 @@ class DiffusionTransformerImage(nn.Module):
         return query, query_pos
     
     def compute_scene_embedding(self, context_features, context_pos, query, query_pos):
-        scene_embeddings = self.re_cross_attn(query=query, value=context_features, query_pos=query_pos, value_pos=context_pos)
+        # cross attent within scene
+        scene_embeddings = self.re_cross_attn_within(query=query, value=context_features, query_pos=query_pos, value_pos=context_pos)
         scene_embeddings = scene_embeddings[-1].squeeze(0)
         scene_embeddings = einops.rearrange(scene_embeddings, '(b oh) c -> oh b c', oh=self.obs_horizon)
-        scene_embedding = self.re_cross_attn(value=scene_embeddings[:-1], query=scene_embeddings[-1:])
+
+        # add time embedding
+        time_embedding = self.time_embedder(torch.arange(self.obs_horizon).to(self.device)).unsqueeze(1)
+        scene_embeddings = scene_embeddings + time_embedding
+
+        # cross attent temporally across scenes
+        scene_embedding = self.re_cross_attn_across(value=scene_embeddings[:-1], query=scene_embeddings[-1:])
         scene_embedding = scene_embedding[-1].squeeze(0)
         return scene_embedding
 
@@ -107,33 +117,18 @@ class DiffusionTransformerImage(nn.Module):
         rgb = self.normalize_rgb_fn(rgb)
         rgb = einops.rearrange(rgb, '(b t) c h w -> b t c h w', t=self.obs_horizon)
         return rgb
-    
-    def normalize_pos(self, pos):
-        pos = self.normalize_pos_fn(pos)
-        return pos
-    
-    def unnormalize_pos(self, pos):
-        pos = self.unnormalize_pos_fn(pos)
-        return pos
-    
-    def normalize_trajectory(self, traj, agent_pos):
+        
+    def to_rel_trajectory(self, traj, agent_pos):
         traj = traj - agent_pos[:, None, :]
         return traj
 
-    def unnormalize_trajectory(self, traj, agent_pos):
+    def to_abs_trajectory(self, traj, agent_pos):
         traj = traj + agent_pos[:, None, :]
         return traj
 
-    def predict_action(self, obs_dict) -> torch.Tensor:
-        # get observation data
-        rgb = obs_dict["image"].to(self.device)
-        agent_hist = obs_dict["agent_pos"].to(self.device)
-        agent_pos = agent_hist[:, -1]
-        B = rgb.shape[0]
-        
+    def compute_global_cond(self, images, agent_hist):
         # normalize data
-        nrgb = self.normalize_rgb_fn(rgb)
-        agent_hist = self.normalize_pos(agent_hist)
+        nrgb = self.normalize_rgb_fn(images)
 
         # compute scene embedding
         nrgb = einops.rearrange(nrgb, 'b oh c h w -> (b oh) c h w')
@@ -142,8 +137,19 @@ class DiffusionTransformerImage(nn.Module):
         query, query_pos = self.compute_query_features(agent_hist)
         scene_embedding = self.compute_scene_embedding(context_features, context_pos, query, query_pos)
 
+        return scene_embedding
+
+    def predict_action(self, obs_dict) -> torch.Tensor:
+        # get observation data
+        images = obs_dict["image"].to(self.device)
+        agent_hist = obs_dict["agent_pos"].to(self.device)
+        B = images.shape[0]
+
+        # compute scene embedding
+        scene_embedding = self.compute_global_cond(images, agent_hist)
+
         noisy_action = torch.randn(
-            (B, self.action_horizon, self.action_dim), device=self.device)
+            (B, self.pred_horizon, self.action_dim), device=self.device)
         naction = noisy_action
 
         self.noise_scheduler.set_timesteps(num_inference_steps=self.num_inference_steps, device=self.device)
@@ -154,37 +160,28 @@ class DiffusionTransformerImage(nn.Module):
                     timestep=k,
                     global_cond=scene_embedding
                 )
-                        # inverse diffusion step (remove noise)
+            # inverse diffusion step (remove noise)
             naction = self.noise_scheduler.step(
                 model_output=noise_pred,
                 timestep=k,
                 sample=naction
             ).prev_sample
 
-        action = self.unnormalize_pos(naction)
-        return action
-
+        return naction
 
     def compute_loss(self, batch):
         # get batch data
-        rgb = batch["image"].to(self.device)
+        images = batch["image"].to(self.device)
         agent_hist = batch["agent_pos"].to(self.device)
         agent_pos = agent_hist[:, -1]
         traj = batch["action"].to(self.device)
-        B = rgb.shape[0]
-
-        # normalize data
-        nrgb = self.normalize_rgb_fn(rgb)
-        agent_hist = self.normalize_pos(agent_hist)
-        traj = self.normalize_pos(traj)
-        traj = self.normalize_trajectory(traj, agent_pos)
+        B = agent_hist.shape[0]
 
         # compute scene embedding
-        nrgb = einops.rearrange(nrgb, 'b oh c h w -> (b oh) c h w')
-        agent_hist = einops.rearrange(agent_hist, 'b oh c -> (b oh) c')
-        context_features, context_pos = self.compute_context_features(nrgb)
-        query, query_pos = self.compute_query_features(agent_hist)
-        scene_embedding = self.compute_scene_embedding(context_features, context_pos, query, query_pos)
+        scene_embedding = self.compute_global_cond(images, agent_hist)
+
+        # normalize trajectory
+        traj = self.to_rel_trajectory(traj, agent_pos)
 
         # add noise to target
         noise = torch.randn(traj.shape).to(self.device)
