@@ -1000,11 +1000,13 @@ def main():
             epoch_loss = np.mean(epoch_loss)
             losses.append(epoch_loss)
             tglobal.set_postfix(loss=epoch_loss)
-            log_buffer += {'loss': epoch_loss}
+            log_buffer.append({'loss': epoch_loss})
             
             if epoch_idx % args.save_model_every == 0:
-                for log in log_buffer:
-                    wandb.log(log)
+                for metrics in log_buffer:
+                    print(type(metrics))
+                    print(metrics)
+                    wandb.log(metrics)
                 log_buffer = list()
                 print('Saving model...')
                 ckpt = {
