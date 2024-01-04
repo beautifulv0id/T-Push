@@ -1004,8 +1004,6 @@ def main():
             
             if epoch_idx % args.save_model_every == 0:
                 for metrics in log_buffer:
-                    print(type(metrics))
-                    print(metrics)
                     wandb.log(metrics)
                 log_buffer = list()
                 print('Saving model...')
