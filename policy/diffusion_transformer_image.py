@@ -44,7 +44,7 @@ class DiffusionTransformerImage(nn.Module):
             self.vis_backbone.requires_grad_(False)
             self.vis_out_proj = nn.Linear(256, embedding_dim).to(device)
 
-        self.query_embedding = nn.Embedding(1, embedding_dim).to(device)
+        self.query_emb = nn.Embedding(1, embedding_dim).to(device)
         self.rotary_embedder = RotaryPositionEncoding2D(embedding_dim).to(device)
 
         self.re_cross_attn_within = RelativeCrossAttentionModule(embedding_dim,
@@ -81,9 +81,21 @@ class DiffusionTransformerImage(nn.Module):
         return xy
     
     def rotary_embed(self, x):
+        """
+        Args:
+            x (torch.Tensor): (B, N, Da)
+        Returns:
+            torch.Tensor: (B, N, 2, D//2)
+        """
         return self.rotary_embedder(x)
     
     def compute_context_features(self, rgb):
+        """
+        Args:
+            rgb (torch.Tensor): (B, C, H, W)
+        Returns:
+            torch.Tensor: (B, N, C)
+        """
         rgb_features = self.compute_visual_features(rgb)
         rgb_pos = self.get_img_positions(rgb_features.shape[-2:])
         rgb_pos = einops.repeat(rgb_pos, 'c h w -> b (h w) c', b=rgb.shape[0])
@@ -92,61 +104,98 @@ class DiffusionTransformerImage(nn.Module):
         return context_features, context_pos
     
     def compute_query_features(self, agent_pos):
-        query = einops.repeat(self.query_embedding.weight, '1 c -> 1 b c', b=agent_pos.shape[0])
+        query = einops.repeat(self.query_emb.weight, '1 c -> 1 b c', b=agent_pos.shape[0])
         query_pos = einops.repeat(agent_pos, 'b c -> b 1 c')
         query_pos = self.rotary_embed(query_pos)
         return query, query_pos
     
-    def compute_scene_embedding(self, context_features, context_pos, query, query_pos):
-        # cross attent within scene
-        scene_embeddings = self.re_cross_attn_within(query=query, value=context_features, query_pos=query_pos, value_pos=context_pos)
-        scene_embeddings = scene_embeddings[-1].squeeze(0)
-        scene_embeddings = einops.rearrange(scene_embeddings, '(b oh) c -> oh b c', oh=self.obs_horizon)
-
+    def compute_local_obs_representation(self, context_features, context_pos, query, query_pos):
+        obs_embs = self.re_cross_attn_within(query=query, value=context_features, query_pos=query_pos, value_pos=context_pos)
+        obs_embs = obs_embs[-1].squeeze(0)
+        return obs_embs
+    
+    def attend_across_obs(self, obs_embs):
+        """
+        Args:
+            obs_embs (torch.Tensor): (oh, B, C)
+        Returns:
+            torch.Tensor: (B, C)
+        """
         # add time embedding
-        time_embedding = self.time_embedder(torch.arange(self.obs_horizon).to(self.device)).unsqueeze(1)
-        scene_embeddings = scene_embeddings + time_embedding
+        time_emb = self.time_embedder(torch.arange(self.obs_horizon).to(self.device)).unsqueeze(1)
+        obs_embs = obs_embs + time_emb
 
-        # cross attent temporally across scenes
-        scene_embedding = self.re_cross_attn_across(value=scene_embeddings[:-1], query=scene_embeddings[-1:])
-        scene_embedding = scene_embedding[-1].squeeze(0)
-        return scene_embedding
-
-    def normalize_rgb(self, rgb):
-        rgb = einops.rearrange(rgb, 'b t c h w -> (b t) c h w')
-        rgb = self.normalize_rgb_fn(rgb)
-        rgb = einops.rearrange(rgb, '(b t) c h w -> b t c h w', t=self.obs_horizon)
-        return rgb
+        # cross attent (temporally) across observations
+        obs_emb = self.re_cross_attn_across(value=obs_embs[:-1], query=obs_embs[-1:])
+        obs_emb = obs_emb[-1].squeeze(0)
+        return obs_emb
         
     def to_rel_trajectory(self, traj, agent_pos):
+        """
+        Args:
+            traj (torch.Tensor): (B, t, Da)
+            agent_pos (torch.Tensor): (B, Da)
+
+        Returns:
+            torch.Tensor: (B, t, Da)
+        """
         traj = traj - agent_pos[:, None, :]
         return traj
 
     def to_abs_trajectory(self, traj, agent_pos):
+        """
+        Args:
+            traj (torch.Tensor): (B, t, Da)
+            agent_pos (torch.Tensor): (B, Da)
+
+        Returns:    
+            torch.Tensor: (B, t, Da)
+        """
         traj = traj + agent_pos[:, None, :]
         return traj
 
     def compute_global_cond(self, images, agent_hist):
+        """
+        Args:
+            images (torch.Tensor): (B, To, C, H, W)
+            agent_hist (torch.Tensor): (B, To, Da)
+
+        Returns:
+            torch.Tensor: (B, *)
+        """
+        # rearrange data s.t. each observation is encoded separately
+        images = einops.rearrange(images, 'b oh c h w -> (b oh) c h w')
+        agent_hist = einops.rearrange(agent_hist, 'b oh c -> (b oh) c')
+        
         # normalize data
-        nrgb = self.normalize_rgb_fn(images)
+        nimages = self.normalize_rgb_fn(images)
 
         # compute scene embedding
-        nrgb = einops.rearrange(nrgb, 'b oh c h w -> (b oh) c h w')
-        agent_hist = einops.rearrange(agent_hist, 'b oh c -> (b oh) c')
-        context_features, context_pos = self.compute_context_features(nrgb)
+        context_features, context_pos = self.compute_context_features(nimages)
         query, query_pos = self.compute_query_features(agent_hist)
-        scene_embedding = self.compute_scene_embedding(context_features, context_pos, query, query_pos)
+        obs_embs = self.compute_local_obs_representation(context_features, context_pos, query, query_pos)
+        obs_embs = einops.rearrange(obs_embs, '(b oh) c -> oh b c', oh=self.obs_horizon)
+        obs_emb = self.attend_across_obs(obs_embs)
 
-        return scene_embedding
+        return obs_emb
 
     def predict_action(self, obs_dict) -> torch.Tensor:
+        """
+        Args:
+            obs_dict (dict): dict of observations
+                image (torch.Tensor): (B, To, C, H, W)
+                agent_pos (torch.Tensor): (B, To, Da)
+        Returns:    
+            torch.Tensor: (B, Ta, Da)
+        """
+
         # get observation data
         images = obs_dict["image"].to(self.device)
         agent_hist = obs_dict["agent_pos"].to(self.device)
         B = images.shape[0]
 
         # compute scene embedding
-        scene_embedding = self.compute_global_cond(images, agent_hist)
+        scene_emb = self.compute_global_cond(images, agent_hist)
 
         noisy_action = torch.randn(
             (B, self.pred_horizon, self.action_dim), device=self.device)
@@ -158,7 +207,7 @@ class DiffusionTransformerImage(nn.Module):
             noise_pred = self.noise_pred_net(
                     sample=naction,
                     timestep=k,
-                    global_cond=scene_embedding
+                    global_cond=scene_emb
                 )
             # inverse diffusion step (remove noise)
             naction = self.noise_scheduler.step(
@@ -170,6 +219,16 @@ class DiffusionTransformerImage(nn.Module):
         return naction
 
     def compute_loss(self, batch):
+        """
+        Args:
+            batch (dict): dict of observations
+                image (torch.Tensor): (B, To, C, H, W)
+                agent_pos (torch.Tensor): (B, To, Da)
+                action (torch.Tensor): (B, Ta, Da)
+        Returns:    
+            torch.Tensor: (B, Ta, Da)
+        """
+
         # get batch data
         images = batch["image"].to(self.device)
         agent_hist = batch["agent_pos"].to(self.device)
@@ -178,7 +237,7 @@ class DiffusionTransformerImage(nn.Module):
         B = agent_hist.shape[0]
 
         # compute scene embedding
-        scene_embedding = self.compute_global_cond(images, agent_hist)
+        scene_emb = self.compute_global_cond(images, agent_hist)
 
         # normalize trajectory
         traj = self.to_rel_trajectory(traj, agent_pos)
@@ -192,7 +251,7 @@ class DiffusionTransformerImage(nn.Module):
         noisy_traj = self.noise_scheduler.add_noise(
             traj, noise, timesteps)
         
-        noise_pred = self.noise_pred_net(sample=noisy_traj, timestep=timesteps, global_cond=scene_embedding)
+        noise_pred = self.noise_pred_net(sample=noisy_traj, timestep=timesteps, global_cond=scene_emb)
         loss = F.mse_loss(noise_pred, noise).mean()
 
         return loss
