@@ -76,7 +76,7 @@ class DiffusionTransformerImage(nn.Module):
         return out
     
     def get_img_positions(self, shape):
-        xy = torch.meshgrid([torch.linspace(0, 1, shape[0]), torch.linspace(0, 1, shape[1])])
+        xy = torch.meshgrid([torch.linspace(0, 1, shape[0]), torch.linspace(0, 1, shape[1])], indexing='ij')
         xy = torch.stack(xy, dim=0).float().to(self.device)
         return xy
     

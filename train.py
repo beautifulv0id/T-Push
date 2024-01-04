@@ -882,6 +882,7 @@ def main():
         gdown.download(id=id, output=dataset_path, quiet=False)
 
     # parameters
+    batch_size = args.batch_size
     pred_horizon = 16
     obs_horizon = 2
     action_horizon = 8
@@ -902,7 +903,7 @@ def main():
     # create dataloader
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=64,
+        batch_size=batch_size,
         num_workers=4,
         shuffle=True,
         # accelerate cpu-gpu transfer
@@ -973,7 +974,7 @@ def main():
         lr_scheduler.load_state_dict(ckpt['lr_scheduler'])
 
     print('Start training from epoch: ', start_epoch)
-
+    log_buffer = list()
     with tqdm(range(start_epoch, num_epochs), desc='Epoch') as tglobal:
         losses = list()
         for epoch_idx in tglobal:
@@ -999,7 +1000,12 @@ def main():
             epoch_loss = np.mean(epoch_loss)
             losses.append(epoch_loss)
             tglobal.set_postfix(loss=epoch_loss)
+            log_buffer += {'loss': epoch_loss}
+            
             if epoch_idx % args.save_model_every == 0:
+                for log in log_buffer:
+                    wandb.log(log)
+                log_buffer = list()
                 print('Saving model...')
                 ckpt = {
                     'model': model.state_dict(),
@@ -1015,8 +1021,6 @@ def main():
                     best_loss = epoch_loss
                     wandb.save(os.path.join(model_save_dir, 'best_model.ckpt'))
                 
-            wandb.log({'loss': epoch_loss}, step = epoch_idx)
-            # save model
 
     ema_model = ema.averaged_model
 
