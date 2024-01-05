@@ -24,11 +24,12 @@ from utils.dataset import PushTImageDataset, unnormalize_data
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_path', type=str, default="./data/pusht_cchi_v7_replay.zarr.zip", help="path where data is stored")
-    parser.add_argument('--num_epochs', type=int, default=1000, help='number of epochs to train')
+    parser.add_argument('--num_epochs', type=int, default=50000, help='number of epochs to train')
     parser.add_argument('--resume_run_id', type=str, default=None, help='resume training from a previous run')
     parser.add_argument('--save_model_every', type=int, default=50, help='save model every n epochs')
     parser.add_argument('--embedding_dim', type=int, default=60, help='embedding dimension')
     parser.add_argument('--batch_size', type=int, default=64, help='batch size')
+    parser.add_argument('--silent', action='store_true', help='disable tqdm progress bar')
     return parser.parse_args()
     
 def init_wandb(args):
@@ -136,15 +137,18 @@ def main():
     best_loss = np.inf
 
     if args.resume_run_id is not None:
-        print('Resuming from run: ', args.resume_run_id)
-        ckptn = wandb.restore('latest_model.ckpt').name
-        ckpt = torch.load(ckptn)
-        start_epoch = ckpt['epoch_idx'] + 1
-        model.load_state_dict(ckpt['model'])
-        best_loss = ckpt['loss']
-        ema_model.load_state_dict(ckpt['ema_model'])
-        optimizer.load_state_dict(ckpt['optimizer'])
-        lr_scheduler.load_state_dict(ckpt['lr_scheduler'])
+        ckptf = wandb.restore('latest_model.ckpt')
+        if ckpt is not None:
+            print('Resuming from run: ', args.resume_run_id)   
+            ckpt = torch.load(ckptf.name)
+            start_epoch = ckpt['epoch_idx'] + 1
+            model.load_state_dict(ckpt['model'])
+            best_loss = ckpt['loss']
+            ema_model.load_state_dict(ckpt['ema_model'])
+            optimizer.load_state_dict(ckpt['optimizer'])
+            lr_scheduler.load_state_dict(ckpt['lr_scheduler'])
+        else:
+            print('No checkpoint found, starting from scratch')
 
     print('Start training from epoch: ', start_epoch)
     log_buffer = list()
@@ -153,7 +157,7 @@ def main():
         for epoch_idx in tglobal:
             epoch_loss = list()
             # batch loop
-            with tqdm(dataloader, desc='Batch', leave=False) as tepoch:
+            with tqdm(dataloader, desc='Batch', leave=False, disable=args.silent) as tepoch:
                 for item in tepoch:
                     loss = model.compute_loss(item)
                     loss.backward()
