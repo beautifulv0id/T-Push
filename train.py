@@ -2,6 +2,7 @@ from typing import Tuple, Sequence, Dict, Union, Optional, Callable
 import zarr
 import collections
 import wandb
+import shutil
 
 import numpy as np
 import torch
@@ -934,10 +935,10 @@ def main():
                                     pred_horizon=pred_horizon,
                                     noise_scheduler=noise_scheduler,
                                     vis_backbone='clip',
-                                    re_cross_attn_layer_within=3,
-                                    re_cross_attn_num_heads_within=3,
-                                    re_cross_attn_layer_across=3,
-                                    re_cross_attn_num_heads_across=3,
+                                    re_cross_attn_layer_within=5,
+                                    re_cross_attn_num_heads_within=5,
+                                    re_cross_attn_layer_across=5,
+                                    re_cross_attn_num_heads_across=5,
                                     embedding_dim=embedding_dim,
                                     device='cuda')
     start_epoch = 0
@@ -1019,6 +1020,8 @@ def main():
                 wandb.save(os.path.join(model_save_dir, 'latest_model.ckpt'))
                 if epoch_loss < best_loss:
                     best_loss = epoch_loss
+                    shutil.copyfile(os.path.join(model_save_dir, 'latest_model.ckpt'),
+                                    os.path.join(model_save_dir, 'best_model.ckpt'))
                     wandb.save(os.path.join(model_save_dir, 'best_model.ckpt'))
                 
 
