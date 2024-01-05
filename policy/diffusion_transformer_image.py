@@ -22,11 +22,13 @@ class DiffusionTransformerImage(nn.Module):
                     re_cross_attn_num_heads_across=4,
                     embedding_dim=60, 
                     device="cuda",
+                    kernel_size=5,
+                    cond_predict_scale=True,
                     env_size=[512, 512]):
         super().__init__()
 
         assert embedding_dim % 2 == 0, "embedding_dim must be even"
-        assert vis_backbone in ["clip", "resnet50"], "vis_backbone must be either clip or resnet50"
+        assert vis_backbone in ["clip"], "vis_backbone must be clip"
 
 
         self.obs_horizon = obs_horizon
@@ -54,7 +56,10 @@ class DiffusionTransformerImage(nn.Module):
                                                                 re_cross_attn_num_heads_across,
                                                                 re_cross_attn_layer_across).to(device)
         
-        self.noise_pred_net = ConditionalUnet1D(input_dim=action_dim, global_cond_dim=embedding_dim)
+        self.noise_pred_net = ConditionalUnet1D(input_dim=action_dim, 
+                                                global_cond_dim=embedding_dim,
+                                                kernel_size=kernel_size,
+                                                cond_predict_scale=cond_predict_scale).to(device)
         
         self.time_embedder = SinusoidalPosEmb(embedding_dim).to(device)
 
