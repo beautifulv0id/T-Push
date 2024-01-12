@@ -18,15 +18,20 @@ from diffusers.optimization import get_scheduler
 
 from models.ema_model import EMAModel
 from policy.diffusion_transformer_image import DiffusionTransformerImage
+from policy.diffusion_policy import DiffusionPolicy
 from utils.environment import PushTImageEnv
 from utils.dataset import PushTImageDataset, unnormalize_data
+from utils.evaluate_policy import evaluate_policy
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_path', type=str, default="./data/pusht_cchi_v7_replay.zarr.zip", help="path where data is stored")
+    parser.add_argument('--model', type=str, default='diffusion_transformer_image', help='model to train')
     parser.add_argument('--num_epochs', type=int, default=50000, help='number of epochs to train')
     parser.add_argument('--resume_run', type=str, default=None, help='resume training from a previous run')
     parser.add_argument('--save_model_every', type=int, default=5, help='save model every n epochs')
+    parser.add_argument('--n_eval', type=int, default=10, help='save model every n epochs')
+    parser.add_argument('--n_episodes_eval', type=int, default=10, help='save model every n epochs')
     parser.add_argument('--embedding_dim', type=int, default=60, help='embedding dimension')
     parser.add_argument('--batch_size', type=int, default=64, help='batch size')
     parser.add_argument('--silent', action='store_true', help='disable tqdm progress bar')
@@ -103,19 +108,30 @@ def main():
         prediction_type='epsilon'
     )
     obs_horizon = 2
-    model = DiffusionTransformerImage(action_dim=action_dim,
-                                    obs_horizon=obs_horizon,
-                                    pred_horizon=pred_horizon,
-                                    noise_scheduler=noise_scheduler,
-                                    vis_backbone='clip',
-                                    re_cross_attn_layer_within=5,
-                                    re_cross_attn_num_heads_within=5,
-                                    re_cross_attn_layer_across=5,
-                                    re_cross_attn_num_heads_across=5,
-                                    kernel_size=5,
-                                    cond_predict_scale=True,
-                                    embedding_dim=embedding_dim,
-                                    device='cuda')
+
+    if args.model == 'diffusion_transformer_image':
+        model = DiffusionTransformerImage(action_dim=action_dim,
+                                        obs_horizon=obs_horizon,
+                                        pred_horizon=pred_horizon,
+                                        noise_scheduler=noise_scheduler,
+                                        vis_backbone='resnet50',
+                                        re_cross_attn_layer_within=5,
+                                        re_cross_attn_num_heads_within=5,
+                                        re_cross_attn_layer_across=5,
+                                        re_cross_attn_num_heads_across=5,
+                                        kernel_size=5,
+                                        cond_predict_scale=True,
+                                        embedding_dim=embedding_dim,
+                                        device='cuda')
+    elif args.model == 'diffusion_policy':
+        model = DiffusionPolicy(action_dim=action_dim,
+                                obs_horizon=obs_horizon,
+                                pred_horizon=pred_horizon,
+                                noise_scheduler=noise_scheduler,
+                                vis_backbone='resnet18',
+                                kernel_size=5,
+                                cond_predict_scale=True,
+                                device='cuda')
     model = model.to(device)
 
 
@@ -179,7 +195,9 @@ def main():
             epoch_loss = np.mean(epoch_loss)
             losses.append(epoch_loss)
             tglobal.set_postfix(loss=epoch_loss)
-            log_buffer.append({'loss': epoch_loss})
+            metrics = {'loss': epoch_loss}
+            metrics.update(model.get_time_dict(len(dataloader)))
+            log_buffer.append(metrics)
             
             if epoch_idx % args.save_model_every == 0:
                 for metrics in log_buffer:
@@ -201,7 +219,13 @@ def main():
                     shutil.copyfile(os.path.join(model_save_dir, 'latest_model.ckpt'),
                                     os.path.join(model_save_dir, 'best_model.ckpt'))
                     wandb.save(os.path.join(model_save_dir, 'best_model.ckpt'))
-                
+            if epoch_idx % args.n_eval == 0:
+                print('Evaluating model...')
+                ema.averaged_model.eval()
+                val = evaluate_policy(ema.averaged_model, stats, episodes=args.n_episodes_eval, max_steps=200, device=device)
+                wandb.log({'val': val})
+                ema.averaged_model.train()
+
 
     ema_model = ema.averaged_model
 

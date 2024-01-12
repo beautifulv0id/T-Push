@@ -3,11 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from utils.position_encodings import RotaryPositionEncoding2D, SinusoidalPosEmb
 from utils.clip import load_clip
+from utils.resnet import load_resnet50
 from utils.layers import RelativeCrossAttentionModule
 import einops
 from models.conditional_unet1d import ConditionalUnet1D
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-
+import time
 
 class DiffusionTransformerImage(nn.Module):
     def __init__(self, 
@@ -28,7 +29,7 @@ class DiffusionTransformerImage(nn.Module):
         super().__init__()
 
         assert embedding_dim % 2 == 0, "embedding_dim must be even"
-        assert vis_backbone in ["clip"], "vis_backbone must be clip"
+        assert vis_backbone in ["clip", "resnet50"], "vis_backbone must be clip"
 
 
         self.obs_horizon = obs_horizon
@@ -41,10 +42,14 @@ class DiffusionTransformerImage(nn.Module):
 
         if vis_backbone == "clip":
             self.vis_backbone, self.normalize_rgb_fn = load_clip()
-            self.vis_backbone = self.vis_backbone.to(device)
-            self.vis_backbone.eval()
-            self.vis_backbone.requires_grad_(False)
-            self.vis_out_proj = nn.Linear(256, embedding_dim).to(device)
+        elif vis_backbone == "resnet50":
+            self.vis_backbone, self.normalize_rgb_fn = load_resnet50()
+
+        self.vis_backbone = self.vis_backbone.to(device)
+        self.vis_backbone.eval()
+        self.vis_backbone.requires_grad_(False)
+        self.vis_out_proj = nn.Linear(256, embedding_dim).to(device)
+
 
         self.query_emb = nn.Embedding(1, embedding_dim).to(device)
         self.rotary_embedder = RotaryPositionEncoding2D(embedding_dim).to(device)
@@ -65,19 +70,27 @@ class DiffusionTransformerImage(nn.Module):
 
         self.env_size = torch.tensor(env_size).to(self.device).float()
 
+        self.reset_time_dict()
+
+    def reset_time_dict(self):
+        self.time_dict = {
+            'visual_features_t': 0,
+            'local_obs_attention_t': 0,
+            'global_obs_attention_t': 0,
+            'noise_pred_t': 0
+        }
+    
+    def get_time_dict(self, num_steps):
+        for k in self.time_dict.keys():
+            self.time_dict[k] /= num_steps
+        return self.time_dict
+
     def compute_visual_features(self, rgb, out_res=[24, 24]):
-        with torch.no_grad():
-            if out_res == [24, 24]:
-                out = self.vis_backbone(rgb)["res2"]
-            elif out_res == [48, 48]:
-                out = self.vis_backbone(rgb)["res1"]
-            else:
-                raise NotImplementedError
+        out = self.vis_backbone(rgb)["res2"]
         h, w = out.shape[-2:]
         out = einops.rearrange(out, 'b c h w -> b (h w) c')
         out = self.vis_out_proj(out)
         out = einops.rearrange(out, 'b (h w) c -> b c h w', h=h, w=w)
-        out = F.interpolate(out, size=out_res, mode='bilinear', align_corners=False)
         return out
     
     def get_img_positions(self, shape):
@@ -102,7 +115,9 @@ class DiffusionTransformerImage(nn.Module):
             torch.Tensor: (B, N, C)
             torch.Tensor: (B, N, 2, D//2)
         """
+        visual_features_t = time.time()
         rgb_features = self.compute_visual_features(rgb)
+        self.time_dict['visual_features_t'] += time.time() - visual_features_t
         rgb_pos = self.get_img_positions(rgb_features.shape[-2:])
         rgb_pos = einops.repeat(rgb_pos, 'xy h w -> b (h w) xy', b=rgb.shape[0])
         context_features = einops.repeat(rgb_features, 'b c h w -> (h w) b c')
@@ -179,9 +194,16 @@ class DiffusionTransformerImage(nn.Module):
         # compute scene embedding
         context_features, context_pos = self.compute_context_features(nimages)
         query, query_pos = self.compute_query_features(agent_hist)
+
+        local_obs_attention_t = time.time()
         obs_embs = self.compute_local_obs_representation(context_features, context_pos, query, query_pos)
+        self.time_dict['local_obs_attention_t'] += time.time() - local_obs_attention_t
+
         obs_embs = einops.rearrange(obs_embs, '(b oh) c -> oh b c', oh=self.obs_horizon)
+
+        global_obs_attention_t = time.time()
         obs_emb = self.attend_across_obs(obs_embs)
+        self.time_dict['global_obs_attention_t'] += time.time() - global_obs_attention_t
 
         return obs_emb
 
@@ -239,7 +261,6 @@ class DiffusionTransformerImage(nn.Module):
         Returns:    
             torch.Tensor: (B, Ta, Da)
         """
-
         # get batch data
         images = batch["image"].to(self.device)
         agent_hist = batch["agent_pos"].to(self.device)
@@ -267,7 +288,10 @@ class DiffusionTransformerImage(nn.Module):
         noisy_nrtraj = self.noise_scheduler.add_noise(
             nrtraj, noise, timesteps)
         
+        noise_pred_t = time.time()
         noise_pred = self.noise_pred_net(sample=noisy_nrtraj, timestep=timesteps, global_cond=scene_emb)
+        self.time_dict['noise_pred_t'] += time.time() - noise_pred_t
+
         loss = F.mse_loss(noise_pred, noise).mean()
 
         return loss
