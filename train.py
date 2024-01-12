@@ -25,8 +25,8 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_path', type=str, default="./data/pusht_cchi_v7_replay.zarr.zip", help="path where data is stored")
     parser.add_argument('--num_epochs', type=int, default=50000, help='number of epochs to train')
-    parser.add_argument('--resume_run_id', type=str, default=None, help='resume training from a previous run')
-    parser.add_argument('--save_model_every', type=int, default=50, help='save model every n epochs')
+    parser.add_argument('--resume_run', type=str, default=None, help='resume training from a previous run')
+    parser.add_argument('--save_model_every', type=int, default=5, help='save model every n epochs')
     parser.add_argument('--embedding_dim', type=int, default=60, help='embedding dimension')
     parser.add_argument('--batch_size', type=int, default=64, help='batch size')
     parser.add_argument('--silent', action='store_true', help='disable tqdm progress bar')
@@ -36,12 +36,12 @@ def init_wandb(args):
     wandb_args = dict()
     wandb_args['project'] = 'T-Push'
     wandb_args['entity'] = 'felix-herrmann'
-    if args.resume_run_id is not None:
+    if args.resume_run is not None:
         wandb_args['resume'] = "must"
-        wandb_args['id'] = args.resume_run_id
+        wandb_args['id'] = args.resume_run
     
     wandb.init(**wandb_args)
-    if args.resume_run_id is None:
+    if args.resume_run is None:
         wandb.config.update(args)
 
 def main():
@@ -112,6 +112,8 @@ def main():
                                     re_cross_attn_num_heads_within=5,
                                     re_cross_attn_layer_across=5,
                                     re_cross_attn_num_heads_across=5,
+                                    kernel_size=5,
+                                    cond_predict_scale=True,
                                     embedding_dim=embedding_dim,
                                     device='cuda')
     model = model.to(device)
@@ -136,10 +138,10 @@ def main():
     start_epoch = 0
     best_loss = np.inf
 
-    if args.resume_run_id is not None:
+    if args.resume_run is not None:
         ckptf = wandb.restore('latest_model.ckpt')
-        if ckpt is not None:
-            print('Resuming from run: ', args.resume_run_id)   
+        if ckptf is not None:
+            print('Resuming from run: ', args.resume_run)   
             ckpt = torch.load(ckptf.name)
             start_epoch = ckpt['epoch_idx'] + 1
             model.load_state_dict(ckpt['model'])
@@ -239,7 +241,6 @@ def main():
                 action = action.cpu().numpy()
             
             naction = action[0]
-            naction = agent_pos[0, -1].cpu().numpy() + naction
             action_pred = unnormalize_data(naction, stats['action'])
             
             # only take action_horizon number of actions

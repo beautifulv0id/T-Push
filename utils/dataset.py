@@ -106,7 +106,8 @@ class PushTImageDataset(torch.utils.data.Dataset):
         train_data = {
             # first two dims of state vector are agent (i.e. gripper) locations
             'agent_pos': dataset_root['data']['state'][:,:2],
-            'action': dataset_root['data']['action'][:]
+            'action': dataset_root['data']['action'][:],
+            'image': train_image_data
         }
         episode_ends = dataset_root['meta']['episode_ends'][:]
 
@@ -119,14 +120,16 @@ class PushTImageDataset(torch.utils.data.Dataset):
             pad_after=action_horizon-1)
 
         # compute statistics and normalized data to [-1,1]
-        stats = dict()
+        # TODO: mabe this should be done inside the model 
+        # to ensure that all data is in the same space (relevant for positional encoding)
+        stats = {
+            "agent_pos": {"min": 0.0, "max": 512.0},
+            "action": {"min": 0.0, "max": 512.0},
+            "image": {"min": 0.0, "max": 255.0},
+        }
         normalized_train_data = dict()
         for key, data in train_data.items():
-            stats[key] = get_data_stats(data)
             normalized_train_data[key] = normalize_data(data, stats[key])
-
-        # images are already normalized
-        normalized_train_data['image'] = train_image_data
 
         self.indices = indices
         self.stats = stats

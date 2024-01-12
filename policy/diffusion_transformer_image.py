@@ -60,7 +60,7 @@ class DiffusionTransformerImage(nn.Module):
                                                 global_cond_dim=embedding_dim,
                                                 kernel_size=kernel_size,
                                                 cond_predict_scale=cond_predict_scale).to(device)
-        
+                
         self.time_embedder = SinusoidalPosEmb(embedding_dim).to(device)
 
         self.env_size = torch.tensor(env_size).to(self.device).float()
@@ -81,9 +81,9 @@ class DiffusionTransformerImage(nn.Module):
         return out
     
     def get_img_positions(self, shape):
-        xy = torch.meshgrid([torch.linspace(0, 1, shape[0]), torch.linspace(0, 1, shape[1])], indexing='ij')
-        xy = torch.stack(xy, dim=0).float().to(self.device)
-        return xy
+        yx = torch.meshgrid([torch.linspace(-1, 1, shape[0]), torch.linspace(-1, 1, shape[1])], indexing='ij')
+        yx = torch.stack(yx, dim=0).float().to(self.device)
+        return yx
     
     def rotary_embed(self, x):
         """
@@ -100,10 +100,11 @@ class DiffusionTransformerImage(nn.Module):
             rgb (torch.Tensor): (B, C, H, W)
         Returns:
             torch.Tensor: (B, N, C)
+            torch.Tensor: (B, N, 2, D//2)
         """
         rgb_features = self.compute_visual_features(rgb)
         rgb_pos = self.get_img_positions(rgb_features.shape[-2:])
-        rgb_pos = einops.repeat(rgb_pos, 'c h w -> b (h w) c', b=rgb.shape[0])
+        rgb_pos = einops.repeat(rgb_pos, 'xy h w -> b (h w) xy', b=rgb.shape[0])
         context_features = einops.repeat(rgb_features, 'b c h w -> (h w) b c')
         context_pos = self.rotary_embed(rgb_pos)
         return context_features, context_pos
@@ -199,29 +200,34 @@ class DiffusionTransformerImage(nn.Module):
         agent_hist = obs_dict["agent_pos"].to(self.device)
         B = images.shape[0]
 
-        # compute scene embedding
-        scene_emb = self.compute_global_cond(images, agent_hist)
+        # already normalized to [-1, 1]
+        nagent_hist = agent_hist
 
-        noisy_action = torch.randn(
+        # compute scene embedding
+        scene_emb = self.compute_global_cond(images, nagent_hist)
+
+        noisy_nrtraj = torch.randn(
             (B, self.pred_horizon, self.action_dim), device=self.device)
-        naction = noisy_action
+        nrtraj = noisy_nrtraj
 
         self.noise_scheduler.set_timesteps(num_inference_steps=self.num_inference_steps, device=self.device)
 
-        for k in range(self.num_inference_steps):
+        for k in self.noise_scheduler.timesteps:
             noise_pred = self.noise_pred_net(
-                    sample=naction,
+                    sample=nrtraj,
                     timestep=k,
                     global_cond=scene_emb
                 )
             # inverse diffusion step (remove noise)
-            naction = self.noise_scheduler.step(
+            nrtraj = self.noise_scheduler.step(
                 model_output=noise_pred,
                 timestep=k,
-                sample=naction
+                sample=nrtraj
             ).prev_sample
 
-        return naction
+        ntraj = self.to_abs_trajectory(nrtraj, agent_hist[:, -1])
+
+        return ntraj
 
     def compute_loss(self, batch):
         """
@@ -237,26 +243,31 @@ class DiffusionTransformerImage(nn.Module):
         # get batch data
         images = batch["image"].to(self.device)
         agent_hist = batch["agent_pos"].to(self.device)
-        agent_pos = agent_hist[:, -1]
         traj = batch["action"].to(self.device)
+
         B = agent_hist.shape[0]
 
-        # compute scene embedding
-        scene_emb = self.compute_global_cond(images, agent_hist)
+        # already normalized to [-1, 1]
+        ntraj = traj
+        nagent_hist = agent_hist
+        
+        # convert to relative trajectory
+        nrtraj = self.to_rel_trajectory(ntraj, nagent_hist[:, -1])
 
-        # normalize trajectory
-        traj = self.to_rel_trajectory(traj, agent_pos)
+
+        # compute scene embedding
+        scene_emb = self.compute_global_cond(images, nagent_hist)
 
         # add noise to target
-        noise = torch.randn(traj.shape).to(self.device)
+        noise = torch.randn(nrtraj.shape).to(self.device)
         timesteps = torch.randint(
             0, self.noise_scheduler.config.num_train_timesteps, 
-            (B,), device=traj.device
+            (B,), device=nrtraj.device
         ).long()
-        noisy_traj = self.noise_scheduler.add_noise(
-            traj, noise, timesteps)
+        noisy_nrtraj = self.noise_scheduler.add_noise(
+            nrtraj, noise, timesteps)
         
-        noise_pred = self.noise_pred_net(sample=noisy_traj, timestep=timesteps, global_cond=scene_emb)
+        noise_pred = self.noise_pred_net(sample=noisy_nrtraj, timestep=timesteps, global_cond=scene_emb)
         loss = F.mse_loss(noise_pred, noise).mean()
 
         return loss
