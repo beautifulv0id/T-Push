@@ -28,7 +28,8 @@ def parse_args():
     parser.add_argument('--dataset_path', type=str, default="./data/pusht_cchi_v7_replay.zarr.zip", help="path where data is stored")
     parser.add_argument('--model', type=str, default='diffusion_transformer_image', help='model to train')
     parser.add_argument('--num_epochs', type=int, default=50000, help='number of epochs to train')
-    parser.add_argument('--resume_run', type=str, default=None, help='resume training from a previous run')
+    parser.add_argument('--resume_run', action='store_true', help='resume training from a previous run')
+    parser.add_argument('--wandb_id', type=str, default=None, help='resume training from a previous run')
     parser.add_argument('--save_model_every', type=int, default=5, help='save model every n epochs')
     parser.add_argument('--n_eval', type=int, default=10, help='save model every n epochs')
     parser.add_argument('--n_episodes_eval', type=int, default=10, help='save model every n epochs')
@@ -41,12 +42,13 @@ def init_wandb(args):
     wandb_args = dict()
     wandb_args['project'] = 'T-Push'
     wandb_args['entity'] = 'felix-herrmann'
-    if args.resume_run is not None:
-        wandb_args['resume'] = "must"
-        wandb_args['id'] = args.resume_run
+    if args.resume_run:
+        wandb_args['resume'] = "must"        
+    if args.wandb_id is not None:
+        wandb_args['id'] = args.wandb_id
     
     wandb.init(**wandb_args)
-    if args.resume_run is None:
+    if not args.resume_run:
         wandb.config.update(args)
 
 def main():
@@ -114,7 +116,7 @@ def main():
                                         obs_horizon=obs_horizon,
                                         pred_horizon=pred_horizon,
                                         noise_scheduler=noise_scheduler,
-                                        vis_backbone='resnet50',
+                                        vis_backbone='clip',
                                         re_cross_attn_layer_within=5,
                                         re_cross_attn_num_heads_within=5,
                                         re_cross_attn_layer_across=5,
@@ -154,10 +156,10 @@ def main():
     start_epoch = 0
     best_loss = np.inf
 
-    if args.resume_run is not None:
+    if args.resume_run:
         ckptf = wandb.restore('latest_model.ckpt')
         if ckptf is not None:
-            print('Resuming from run: ', args.resume_run)   
+            print('Resuming from run: ', args.wandb_id)   
             ckpt = torch.load(ckptf.name)
             start_epoch = ckpt['epoch_idx'] + 1
             model.load_state_dict(ckpt['model'])
