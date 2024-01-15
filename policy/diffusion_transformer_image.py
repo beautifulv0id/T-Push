@@ -17,6 +17,7 @@ class DiffusionTransformerImage(nn.Module):
                     pred_horizon = None,
                     noise_scheduler: DDPMScheduler = DDPMScheduler(),
                     vis_backbone="clip", 
+                    vis_backbone_layer="res2",
                     re_cross_attn_layer_within=4, 
                     re_cross_attn_num_heads_within=4, 
                     re_cross_attn_layer_across=4,
@@ -39,6 +40,7 @@ class DiffusionTransformerImage(nn.Module):
         self.embedding_dim = embedding_dim
         self.noise_scheduler = noise_scheduler
         self.num_inference_steps = noise_scheduler.config.num_train_timesteps
+        self.vbl = vis_backbone_layer
 
         if vis_backbone == "clip":
             self.vis_backbone, self.normalize_rgb_fn = load_clip()
@@ -48,7 +50,13 @@ class DiffusionTransformerImage(nn.Module):
         self.vis_backbone = self.vis_backbone.to(device)
         self.vis_backbone.eval()
         self.vis_backbone.requires_grad_(False)
-        self.vis_out_proj = nn.Linear(256, embedding_dim).to(device)
+
+
+        if vis_backbone_layer == "res1":
+            vis_out_dim = 64
+        elif vis_backbone_layer == "res2":
+            vis_out_dim = 256
+        self.vis_out_proj = nn.Linear(vis_out_dim, embedding_dim).to(device)
 
 
         self.query_emb = nn.Embedding(1, embedding_dim).to(device)
@@ -85,8 +93,9 @@ class DiffusionTransformerImage(nn.Module):
             self.time_dict[k] /= num_steps
         return self.time_dict
 
-    def compute_visual_features(self, rgb, out_res=[24, 24]):
-        out = self.vis_backbone(rgb)["res2"]
+    def compute_visual_features(self, rgb):
+        with torch.no_grad():
+            out = self.vis_backbone(rgb)[self.vbl]
         h, w = out.shape[-2:]
         out = einops.rearrange(out, 'b c h w -> b (h w) c')
         out = self.vis_out_proj(out)

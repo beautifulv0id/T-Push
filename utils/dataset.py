@@ -92,7 +92,8 @@ class PushTImageDataset(torch.utils.data.Dataset):
                  dataset_path: str,
                  pred_horizon: int,
                  obs_horizon: int,
-                 action_horizon: int):
+                 action_horizon: int,
+                 n_episodes : int = None):
 
         # read from zarr dataset
         dataset_root = zarr.open(dataset_path, 'r')
@@ -110,6 +111,10 @@ class PushTImageDataset(torch.utils.data.Dataset):
             'image': train_image_data
         }
         episode_ends = dataset_root['meta']['episode_ends'][:]
+
+        # only use first n_episodes
+        if n_episodes is not None:
+            episode_ends = episode_ends[:n_episodes]
 
         # compute start and end of each state-action sequence
         # also handles padding

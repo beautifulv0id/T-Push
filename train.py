@@ -27,6 +27,8 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_path', type=str, default="./data/pusht_cchi_v7_replay.zarr.zip", help="path where data is stored")
     parser.add_argument('--model', type=str, default='diffusion_transformer_image', help='model to train')
+    parser.add_argument('--vis_backbone', type=str, default='clip', help='model to train')
+    parser.add_argument('--vis_backbone_layer', type=str, default='res2', help='model to train')    
     parser.add_argument('--num_epochs', type=int, default=50000, help='number of epochs to train')
     parser.add_argument('--resume_run', action='store_true', help='resume training from a previous run')
     parser.add_argument('--wandb_id', type=str, default=None, help='resume training from a previous run')
@@ -85,7 +87,7 @@ def main():
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
-        num_workers=4,
+        num_workers=1,
         shuffle=True,
         # accelerate cpu-gpu transfer
         pin_memory=True,
@@ -116,7 +118,7 @@ def main():
                                         obs_horizon=obs_horizon,
                                         pred_horizon=pred_horizon,
                                         noise_scheduler=noise_scheduler,
-                                        vis_backbone='clip',
+                                        vis_backbone=args.vis_backbone,
                                         re_cross_attn_layer_within=5,
                                         re_cross_attn_num_heads_within=5,
                                         re_cross_attn_layer_across=5,
@@ -130,7 +132,7 @@ def main():
                                 obs_horizon=obs_horizon,
                                 pred_horizon=pred_horizon,
                                 noise_scheduler=noise_scheduler,
-                                vis_backbone='resnet18',
+                                vis_backbone=args.vis_backbone,
                                 kernel_size=5,
                                 cond_predict_scale=True,
                                 device='cuda')
